@@ -1,0 +1,12 @@
+data/
+output/
+*.duckdb
+*.db
+*.sqlite
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.venv/
+venv/
+node_modules/
