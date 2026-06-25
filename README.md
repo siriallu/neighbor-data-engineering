@@ -1,80 +1,96 @@
-# Neighbor — Data Engineer Take-Home
+# Neighbor Data Engineer Take-Home — Submission
 
-Welcome, and thanks for the time you're putting into this.
+**Candidate:** Sireesha A
+**Date:** 06-25-2026
 
-**Time budget: 2 hours.** We tested this internally with our own engineers and they completed it in 2 hours; pace will vary somewhat (some faster, some slower), but please plan around 2 hours and stop there. **Don't push to 3-4 hours to try to finish everything — we'd rather see honest partial work than padded "complete" work.**
+---
 
-We are evaluating *judgment*, not completeness. Pick the parts you can do well, and use a "what I'd do next" section in your README for anything you didn't get to. **A clearly-acknowledged partial does not hurt your score** — we value honesty about what you shipped over a quietly-incomplete submission of similar length.
+## Setup (under 5 minutes)
 
-## Business context
+**Prerequisites:** Python 3.8+
 
-Neighbor is a marketplace for storage rentals: hosts list space (garages, driveways, basements), renters reserve it. We want to report **LTV:CAC** at multiple time grains so the growth and finance teams can see, for each cohort of users, how much we expect them to be worth versus what we paid to acquire them.
+**Step 1 — Create data folder shortcut inside solution/**
+```bash
+cd solution
+cmd /c mklink /J data ..\data
+```
 
-### Cohort definition (important — read carefully)
+**Step 2 — Install dependency**
+```bash
+pip install duckdb==1.5.4
+```
 
-- A "cohort" is the set of users who **joined Neighbor on the same day** (or week, month, year — depending on the grain you're reporting).
-- A user's **predicted LTV** is attributed to their **join date**, regardless of when the listing that produced that LTV actually went live.
-- Acquisition cost is attributed to the user's **join date**, regardless of when the ad spend that drove that signup actually ran.
+**Step 3 — Run the pipeline**
+```bash
+python setup.py
+```
 
-So: if a user joined on 2025-08-01, listed a space on 2025-10-12 with a host_ltv of $5,000, then $5,000 is added to the 2025-08-01 cohort's LTV. Time grains are just rollups of the same underlying user-cohort math.
+Results are written to `solution/output/`:
+- `output/ltv_cac_daily.csv`
+- `output/ltv_cac_weekly.csv`
+- `output/ltv_cac_monthly.csv`
+- `output/ltv_cac_yearly.csv`
 
-### About LTV (read this twice)
+The script is idempotent — safe to run multiple times. All tables are `CREATE OR REPLACE`.
 
-Predicted LTV at Neighbor is computed by an ML model **at the moment a listing is created**, attached to that listing. It's the maximum LTV we expect to extract from the listing over its lifetime — a host-side prediction.
+---
 
-- **Users who never list anything contribute $0 to LTV.** They may still generate realized revenue (by renting on someone else's listing), but that's *realized* revenue, not predicted LTV.
-- The LTV:CAC metric uses **predicted host LTV** in the numerator. If you want to layer in realized revenue as a sanity check or alternative cut, you can — but the headline metric is host-side.
-- `host_ltv` is denominated in **Neighbor's predicted revenue** from that listing over its lifetime — i.e. the net we keep after paying the host. Treat it as a black-box model output. Do not try to recompute it.
+## Data Model
 
-This is a real business reality: storage marketplaces are supply-driven. A single host with a listed space is worth orders of magnitude more than a single renter. The metric reflects that.
+Three staging views read CSVs in-place (no copy). Three normalized tables build on top:
 
-## Input data
+```
+stg_users ──────────► dim_users ──────────────────────────────┐
+                                                               ▼
+stg_listings ──────── fct_listing_ltv ──────► fct_ltv_cac_{daily,weekly,monthly,yearly}
+stg_predictions ────┘                                          ▲
+stg_ad_spend ──────── fct_ad_spend_daily ─────────────────────┘
+```
 
-Five CSV files in `data/`, covering **2021-05-25 through 2026-05-25** (a 5-year window). See `data_dictionary.md` for column-level detail.
+- **`dim_users`** — one row per user: user_id, join_date, acquisition_channel, state. Derived from the first snapshot (`snapshot_date = join_date`), which carries immutable fields.
+- **`fct_listing_ltv`** — one row per listing with an ML prediction: listing_id, host_user_id, listed_date, host_ltv. INNER JOIN to predictions excludes listings with no prediction (they contribute $0 LTV).
+- **`fct_ad_spend_daily`** — one row per (date, channel): total_spend collapsed across all campaigns.
 
-- `users_daily_snapshot.csv` — sparse snapshot of users (state/status changes + final).
-- `listings_daily_snapshot.csv` — sparse snapshot of listings.
-- `reservations.csv` — one row per reservation (user + listing + duration + amount).
-- `listing_predictions.csv` — one row per listing's predicted host LTV, with model version and timestamp.
-- `ad_spend_daily.csv` — daily spend and impressions per campaign, plus `attributed_signups`.
+---
 
-## Tooling
+## Modeling Choices and Rationale
 
-The data is provided as CSV files. You may load it into whatever environment you prefer (DuckDB, SQLite, Postgres, pandas, etc.). Part of what we're interested in is how you set up your working environment, so use what you'd reach for in real work. **Note your choice and why in your README.**
+**Sparse-snapshot de-duplication:** I use `WHERE snapshot_date = join_date` to get each user's first row. This is simpler than a window function and correct because both `join_date` and `acquisition_channel` are stated as immutable in the data dictionary.
 
-## Deliverable
+**LTV attribution to join_date cohort:** All listings owned by a host are summed and attributed to that host's `join_date`, regardless of when the listings were created. The spec explicitly states cohort membership is by join date.
 
-Submit a single `.zip` file containing:
+**No proration of ad spend:** CAC for a cohort = total ad spend on the users' join date for their channel. `attributed_signups` is explicitly described as noisy in the data dictionary — it comes from upstream marketing platforms and does not reliably count actual signups. Using raw spend totals per (date, channel) is the sound choice.
 
-1. **DDL** for the data model you designed (the tables you'd build to support LTV:CAC reporting).
-2. **SQL queries** that compute LTV:CAC at the following grains:
-   - daily (by join date)
-   - weekly (by join week)
-   - monthly (by join month)
-   - yearly (by join year)
+**CAC DISTINCT sub-select:** The CAC CTE uses `SELECT DISTINCT join_date, acquisition_channel FROM dim_users` before joining to `fct_ad_spend_daily`. This makes the business rule explicit — we collect the unique (day, channel) pairs that matter for this cohort — and protects against any future duplicate rows in dim_users inflating spend.
 
-   If you don't get to all four grains, ship what you have and note in your README which ones you skipped and why. A monthly + yearly submission with strong reasoning beats a hand-wavy "all four" submission.
-3. **A README (max 1 page)** that explains:
-   - Your modeling choices and why
-   - Your acquisition-cost attribution approach
-   - Any assumptions you made about edge cases in the data
-   - **Which tools you used** (engine, AI tools) and **why**
-   - 2–3 representative prompts you sent to AI tools during the exercise
-4. **Setup instructions** sufficient for us to reproduce your results in under 5 minutes.
+**Materialized reporting tables over views:** Pre-computed tables are instantaneous to read and signal production-oriented thinking (in real warehouses you would not re-run expensive joins on every BI tool refresh).
 
-## On AI tools
+---
 
-We expect you to use AI tools (Claude, ChatGPT, Copilot, whatever you reach for). We're more interested in *how* you collaborated with AI than whether you used it. Include the short prompt section in your README — we're looking for evidence of how you direct, evaluate, and refine AI output, not gotchas.
+## Acquisition Cost Attribution
 
-## Follow-up
+For each cohort, I identify the distinct `(join_date, acquisition_channel)` pairs where `acquisition_channel` is a paid channel (google_search, google_display, facebook, instagram, tiktok). I then sum all spend from `fct_ad_spend_daily` where `date = join_date AND channel = acquisition_channel`.
 
-If we want to move forward, we'll schedule a 1-hour interview to discuss your solution. In that interview you'll:
+- `referral` and `organic` users → `acquisition_channel` set to NULL in `dim_users` → excluded from CAC CTE → $0 CAC
+- Empty / unattributed users → also normalized to NULL → $0 CAC
+- `ltv_cac_ratio` uses `NULLIF(total_cac, 0)` → returns NULL (not division-by-zero) for cohorts where all users are organic/referral
 
-- Walk us through your design and the tradeoffs you considered.
-- Modify your solution live in response to a small change we'll show you.
+---
 
-## Submitting
+## Assumptions
 
-See `submission_instructions.md`.
+1. `join_date` and `acquisition_channel` are immutable per the data dictionary.
+2. One ML prediction per listing in this dataset — INNER JOIN to `listing_predictions` is safe.
+3. Listings with no matching prediction contribute $0 LTV (excluded by INNER JOIN).
+4. UTC is the implicit timezone; no conversion applied.
+5. `reservations.csv` was not used. LTV is the host-side ML-predicted revenue, not realized renter payments.
+6. Weekly grain uses Monday as the ISO week start (DuckDB default for `DATE_TRUNC('week', ...)`).
+7. Days with paid-channel ad spend but no users joining on that channel still appear in `fct_ad_spend_daily` but are simply not joined to any cohort — they are correctly ignored.
 
-Good luck — we're looking forward to seeing what you build.
+---
+
+## Tools Used
+
+- **DuckDB 1.x** — zero-install OLAP engine; reads CSVs natively; full SQL with `DATE_TRUNC`, `DISTINCT ON`, window functions, and `COPY TO`. Ideal for a self-contained take-home: one `pip install`, no server, cross-platform.
+- **Python 3.x** — orchestration only; no pandas or NumPy required.
+- **Claude AI (claude-sonnet-4-6)** — used for SQL review and README drafting.
