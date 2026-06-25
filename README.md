@@ -94,3 +94,20 @@ For each cohort, I identify the distinct `(join_date, acquisition_channel)` pair
 - **DuckDB 1.x** — zero-install OLAP engine; reads CSVs natively; full SQL with `DATE_TRUNC`, `DISTINCT ON`, window functions, and `COPY TO`. Ideal for a self-contained take-home: one `pip install`, no server, cross-platform.
 - **Python 3.x** — orchestration only; no pandas or NumPy required.
 - **Claude AI (claude-sonnet-4-6)** — used for SQL review and README drafting.
+## AI Prompts Used
+
+1. "In DuckDB, what is the most efficient way to deduplicate a sparse snapshot table 
+and extract the first record per entity? The table emits rows only on change events, 
+and I need the earliest snapshot per user_id to get immutable fields like join_date 
+and acquisition_channel. Should I use DISTINCT ON, ROW_NUMBER, or MIN with GROUP BY?"
+
+2. "I need to compute CAC (Customer Acquisition Cost) by user cohort using daily ad 
+spend data. The ad platform's attributed_signups column is unreliable due to 
+cross-device attribution noise. What is the correct SQL pattern to allocate total 
+daily channel spend to cohorts based on join_date and acquisition_channel, without 
+prorating by signup count?"
+
+3. "For a cohort LTV:CAC analysis at multiple time grains (daily, weekly, monthly, 
+yearly) in DuckDB, should I use DATE_TRUNC or YEARWEEK/EXTRACT for grain-level 
+grouping? Also what is the correct way to handle NULL CAC (organic/referral users 
+with zero acquisition cost) in the final ratio to avoid division by zero?"
