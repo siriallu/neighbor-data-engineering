@@ -113,3 +113,180 @@ SELECT
     SUM(impressions)   AS total_impressions
 FROM stg_ad_spend
 GROUP BY date, channel;
+
+-- ============================================================
+-- REPORTING TABLES (4 grains)
+-- Pattern per grain:
+--   cohort_ltv CTE  : sum LTV via dim_users -> fct_listing_ltv
+--   cohort_cac CTE  : sum spend via DISTINCT (join_date, channel)
+--                     sub-select -> fct_ad_spend_daily
+--   Final SELECT    : join LTV + CAC, compute ratio
+-- ============================================================
+
+-- -------------------------------------------------------
+-- FCT_LTV_CAC_DAILY  (grain: join_date)
+-- -------------------------------------------------------
+
+CREATE OR REPLACE TABLE fct_ltv_cac_daily AS
+WITH cohort_ltv AS (
+    SELECT
+        u.join_date                                              AS cohort_period,
+        COUNT(DISTINCT u.user_id)                               AS user_count,
+        COUNT(DISTINCT l.listing_id)                            AS listing_count,
+        COUNT(DISTINCT CASE WHEN l.listing_id IS NOT NULL
+                            THEN u.user_id END)                 AS host_count,
+        COALESCE(SUM(l.host_ltv), 0)                           AS total_ltv
+    FROM dim_users u
+    LEFT JOIN fct_listing_ltv l ON l.host_user_id = u.user_id
+    GROUP BY u.join_date
+),
+cohort_cac AS (
+    SELECT
+        u.join_date,
+        COALESCE(SUM(s.total_spend), 0)                        AS total_cac
+    FROM (
+        SELECT DISTINCT join_date, acquisition_channel
+        FROM dim_users
+        WHERE acquisition_channel IS NOT NULL
+    ) u
+    LEFT JOIN fct_ad_spend_daily s
+        ON s.date = u.join_date AND s.channel = u.acquisition_channel
+    GROUP BY u.join_date
+)
+SELECT
+    cl.cohort_period,
+    cl.user_count,
+    cl.host_count,
+    cl.listing_count,
+    cl.total_ltv,
+    COALESCE(cc.total_cac, 0)                                  AS total_cac,
+    cl.total_ltv / NULLIF(COALESCE(cc.total_cac, 0), 0)       AS ltv_cac_ratio
+FROM cohort_ltv cl
+LEFT JOIN cohort_cac cc ON cc.join_date = cl.cohort_period
+ORDER BY cl.cohort_period;
+
+-- -------------------------------------------------------
+-- FCT_LTV_CAC_WEEKLY  (grain: ISO week, Monday anchor)
+-- -------------------------------------------------------
+
+CREATE OR REPLACE TABLE fct_ltv_cac_weekly AS
+WITH cohort_ltv AS (
+    SELECT
+        DATE_TRUNC('week', u.join_date)::DATE                  AS cohort_period,
+        COUNT(DISTINCT u.user_id)                               AS user_count,
+        COUNT(DISTINCT l.listing_id)                            AS listing_count,
+        COUNT(DISTINCT CASE WHEN l.listing_id IS NOT NULL
+                            THEN u.user_id END)                 AS host_count,
+        COALESCE(SUM(l.host_ltv), 0)                           AS total_ltv
+    FROM dim_users u
+    LEFT JOIN fct_listing_ltv l ON l.host_user_id = u.user_id
+    GROUP BY DATE_TRUNC('week', u.join_date)
+),
+cohort_cac AS (
+    SELECT
+        DATE_TRUNC('week', u.join_date)::DATE                  AS cohort_week,
+        COALESCE(SUM(s.total_spend), 0)                        AS total_cac
+    FROM (
+        SELECT DISTINCT join_date, acquisition_channel
+        FROM dim_users
+        WHERE acquisition_channel IS NOT NULL
+    ) u
+    LEFT JOIN fct_ad_spend_daily s
+        ON s.date = u.join_date AND s.channel = u.acquisition_channel
+    GROUP BY DATE_TRUNC('week', u.join_date)
+)
+SELECT
+    cl.cohort_period,
+    cl.user_count,
+    cl.host_count,
+    cl.listing_count,
+    cl.total_ltv,
+    COALESCE(cc.total_cac, 0)                                  AS total_cac,
+    cl.total_ltv / NULLIF(COALESCE(cc.total_cac, 0), 0)       AS ltv_cac_ratio
+FROM cohort_ltv cl
+LEFT JOIN cohort_cac cc ON cc.cohort_week = cl.cohort_period
+ORDER BY cl.cohort_period;
+
+-- -------------------------------------------------------
+-- FCT_LTV_CAC_MONTHLY  (grain: first day of join month)
+-- -------------------------------------------------------
+
+CREATE OR REPLACE TABLE fct_ltv_cac_monthly AS
+WITH cohort_ltv AS (
+    SELECT
+        DATE_TRUNC('month', u.join_date)::DATE                 AS cohort_period,
+        COUNT(DISTINCT u.user_id)                               AS user_count,
+        COUNT(DISTINCT l.listing_id)                            AS listing_count,
+        COUNT(DISTINCT CASE WHEN l.listing_id IS NOT NULL
+                            THEN u.user_id END)                 AS host_count,
+        COALESCE(SUM(l.host_ltv), 0)                           AS total_ltv
+    FROM dim_users u
+    LEFT JOIN fct_listing_ltv l ON l.host_user_id = u.user_id
+    GROUP BY DATE_TRUNC('month', u.join_date)
+),
+cohort_cac AS (
+    SELECT
+        DATE_TRUNC('month', u.join_date)::DATE                 AS cohort_month,
+        COALESCE(SUM(s.total_spend), 0)                        AS total_cac
+    FROM (
+        SELECT DISTINCT join_date, acquisition_channel
+        FROM dim_users
+        WHERE acquisition_channel IS NOT NULL
+    ) u
+    LEFT JOIN fct_ad_spend_daily s
+        ON s.date = u.join_date AND s.channel = u.acquisition_channel
+    GROUP BY DATE_TRUNC('month', u.join_date)
+)
+SELECT
+    cl.cohort_period,
+    cl.user_count,
+    cl.host_count,
+    cl.listing_count,
+    cl.total_ltv,
+    COALESCE(cc.total_cac, 0)                                  AS total_cac,
+    cl.total_ltv / NULLIF(COALESCE(cc.total_cac, 0), 0)       AS ltv_cac_ratio
+FROM cohort_ltv cl
+LEFT JOIN cohort_cac cc ON cc.cohort_month = cl.cohort_period
+ORDER BY cl.cohort_period;
+
+-- -------------------------------------------------------
+-- FCT_LTV_CAC_YEARLY  (grain: first day of join year)
+-- -------------------------------------------------------
+
+CREATE OR REPLACE TABLE fct_ltv_cac_yearly AS
+WITH cohort_ltv AS (
+    SELECT
+        DATE_TRUNC('year', u.join_date)::DATE                  AS cohort_period,
+        COUNT(DISTINCT u.user_id)                               AS user_count,
+        COUNT(DISTINCT l.listing_id)                            AS listing_count,
+        COUNT(DISTINCT CASE WHEN l.listing_id IS NOT NULL
+                            THEN u.user_id END)                 AS host_count,
+        COALESCE(SUM(l.host_ltv), 0)                           AS total_ltv
+    FROM dim_users u
+    LEFT JOIN fct_listing_ltv l ON l.host_user_id = u.user_id
+    GROUP BY DATE_TRUNC('year', u.join_date)
+),
+cohort_cac AS (
+    SELECT
+        DATE_TRUNC('year', u.join_date)::DATE                  AS cohort_year,
+        COALESCE(SUM(s.total_spend), 0)                        AS total_cac
+    FROM (
+        SELECT DISTINCT join_date, acquisition_channel
+        FROM dim_users
+        WHERE acquisition_channel IS NOT NULL
+    ) u
+    LEFT JOIN fct_ad_spend_daily s
+        ON s.date = u.join_date AND s.channel = u.acquisition_channel
+    GROUP BY DATE_TRUNC('year', u.join_date)
+)
+SELECT
+    cl.cohort_period,
+    cl.user_count,
+    cl.host_count,
+    cl.listing_count,
+    cl.total_ltv,
+    COALESCE(cc.total_cac, 0)                                  AS total_cac,
+    cl.total_ltv / NULLIF(COALESCE(cc.total_cac, 0), 0)       AS ltv_cac_ratio
+FROM cohort_ltv cl
+LEFT JOIN cohort_cac cc ON cc.cohort_year = cl.cohort_period
+ORDER BY cl.cohort_period
